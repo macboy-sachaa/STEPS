@@ -1,0 +1,49 @@
+create or replace PROCEDURE USP_UPDATE_USER_INPUTS(vMODEL_ID INTEGER,vFC_INPUTS NVARCHAR2,vMFN_INPUTS NVARCHAR2,vSTN_INPUTS NVARCHAR2,vBACKLOG_INPUTS NVARCHAR2,vHOLIDAY_INPUTS NVARCHAR2) AS 
+BEGIN
+  
+  
+  ---------------------------------Update FC Shipouts Version----------------------------------
+  UPDATE LOG_MODEL_CONFIG
+  SET C_VERSION = UPPER(TRIM(NVL(vFC_INPUTS,C_VERSION))),
+      LINKEDMODEL = CAST(NVL(vFC_INPUTS,LINKEDMODEL) AS INTEGER),
+      UPDATED_AT = SYSDATE
+  WHERE MODEL_ID = vMODEL_ID
+  AND STEP_CODE = 'FC_SHIPOUTS';
+  
+  ---------------------------------Update MFN Inputs Version-----------------------------------
+  UPDATE LOG_MODEL_CONFIG
+  SET C_VERSION = UPPER(TRIM(NVL(vMFN_INPUTS,C_VERSION))),
+      LINKEDMODEL = CAST(NVL(vMFN_INPUTS,LINKEDMODEL) AS INTEGER),
+      UPDATED_AT = SYSDATE
+  WHERE MODEL_ID = vMODEL_ID
+  AND STEP_CODE = 'MFN_PICKUP_INPUTS';
+  
+  ---------------------------------Update Station Inputs Version-------------------------------
+  UPDATE LOG_MODEL_CONFIG
+  SET C_VERSION = UPPER(TRIM(NVL(vSTN_INPUTS,C_VERSION))),
+      LINKEDMODEL = CAST(NVL(vSTN_INPUTS,LINKEDMODEL) AS INTEGER),
+      UPDATED_AT = SYSDATE
+  WHERE MODEL_ID = vMODEL_ID
+  AND STEP_CODE = 'STATION CAPACITY & RETURNS';
+  
+  ---------------------------------Update Backlog Target Version-------------------------------
+  UPDATE LOG_MODEL_CONFIG
+  SET C_VERSION = UPPER(TRIM(NVL(vBACKLOG_INPUTS,C_VERSION))),
+      LINKEDMODEL = CAST(NVL(vBACKLOG_INPUTS,LINKEDMODEL) AS INTEGER),
+      UPDATED_AT = SYSDATE
+  WHERE MODEL_ID = vMODEL_ID
+  AND STEP_CODE = 'STATION_BACKLOG_TARGET';
+  
+  ---------------------------------Update Holiday List Version--------------------------------- 
+  UPDATE LOG_MODEL_CONFIG
+  SET C_VERSION = UPPER(TRIM(NVL(vHOLIDAY_INPUTS,C_VERSION))),
+      LINKEDMODEL = CAST(NVL(vHOLIDAY_INPUTS,LINKEDMODEL) AS INTEGER),
+      UPDATED_AT = SYSDATE
+  WHERE MODEL_ID = vMODEL_ID
+  AND STEP_CODE = 'STATION HOLIDAY LIST';
+  
+  COMMIT;
+  
+  apex_application.g_print_success_message:= '<span class="notification">Configurations Updated</span>';
+  
+END USP_UPDATE_USER_INPUTS;

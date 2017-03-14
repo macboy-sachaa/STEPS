@@ -1,0 +1,525 @@
+create or replace PROCEDURE USP_Station_Volume_Act (vModel_Id integer)
+AS
+vLARGESMALL NVARCHAR2(30);
+vSTNZIP NVARCHAR2(30);
+vESMM NVARCHAR2(30);
+vMFN NVARCHAR2(30);
+BEGIN
+/*
+This procedure calculates Volume at station both AFN and MFN.
+AFN Volume is calculated on the basis of SNoP Forecast and
+MFN volume is calculated based on historical AFN/MFN contribution at Station Level.
+*/
+
+SELECT C_VERSION INTO vLARGESMALL
+FROM LOG_MODEL_CONFIG
+WHERE MODEL_ID = vMODEL_ID
+AND STEP_TYPE = 'CONFIGURATION_DATA'
+AND STEP_CODE = 'ZIPCODE LARGE/SMALL CONTRIBUTION';
+
+SELECT C_VERSION INTO vSTNZIP
+FROM LOG_MODEL_CONFIG
+WHERE MODEL_ID = vMODEL_ID
+AND STEP_TYPE = 'CONFIGURATION_DATA'
+AND STEP_CODE = 'STATION ZIPCODE MAPPING (LARGE/SMALL)';
+
+SELECT C_VERSION INTO vESMM
+FROM LOG_MODEL_CONFIG
+WHERE MODEL_ID = vMODEL_ID
+AND STEP_TYPE = 'CONFIGURATION_DATA'
+AND STEP_CODE = 'ESMM ROUTES DATA';
+
+SELECT C_VERSION INTO vMFN
+FROM LOG_MODEL_CONFIG
+WHERE MODEL_ID = vMODEL_ID
+AND STEP_TYPE = 'CONFIGURATION_DATA'
+AND STEP_CODE = 'ZIPCODE MFN CONTRIBUTION';
+
+
+
+
+EXECUTE IMMEDIATE 'TRUNCATE TABLE stg_ZipcodeVolumes_ACT DROP STORAGE';
+COMMIT;
+
+
+EXECUTE IMMEDIATE 'TRUNCATE TABLE STG_BLEEDOFFS_LEVEL2 DROP STORAGE';
+COMMIT;
+
+/* 
+   Calculating STD, FT volumes at a Shipout date, EDD, Zipcode, Warehouse, Station level based on 2 factors:
+   1) Contribution at a zipcode of Large Small
+   2) Mapping of Pincode to a Station based on type of package managed(All - 1, Small - 2, Large - 3)
+*/
+
+Insert Into stg_ZipcodeVolumes_ACT -- Insert Consolidated AFN Data into temp table
+SELECT MODEL_ID
+      ,SHIPOUT_DATE
+      ,EDD
+      ,ZIPCODE
+      ,WAREHOUSE_ID AS FC
+      ,STATION
+      ,SUM(STD_VOLUME) AS STD_VOLUME
+      ,SUM(STD_VOLUME_L) AS STD_VOLUME_L
+      ,SUM(FTSAME_VOLUME) AS FTSAME_VOLUME
+      ,SUM(FTSAME_VOLUME_L) AS FTSAME_VOLUME_L
+      ,SUM(FTNEXT_VOLUME) AS FTNEXT_VOLUME
+      ,SUM(FTNEXT_VOLUME_L) AS FTNEXT_VOLUME_L
+      ,SUM(FTEXP_VOLUME) AS FTEXP_VOLUME
+      ,SUM(FTEXP_VOLUME_L) AS FTEXP_VOLUME_L
+FROM
+(
+    SELECT C.MODEL_ID
+          ,C.SHIPOUT_DATE
+          ,C.STD_EDD AS EDD
+          ,UPPER(TRIM(C.WAREHOUSE_ID)) AS WAREHOUSE_ID
+          ,UPPER(TRIM(M.STATION)) AS STATION
+          ,C.Zipcode AS Zipcode
+          ,C.STD_VOLUME*NVL(L.Contribution,1)*NVL(M.RATIO,1) AS STD_VOLUME
+          ,CASE WHEN L.PACKAGE_TYPE = 3 THEN C.STD_VOLUME*NVL(L.Contribution,1)*NVL(M.RATIO,1) ELSE 0 END AS STD_VOLUME_L
+          ,0 AS FTSAME_VOLUME
+          ,0 AS FTSAME_VOLUME_L
+          ,0 AS FTNEXT_VOLUME
+          ,0 AS FTNEXT_VOLUME_L
+          ,0 AS FTEXP_VOLUME
+          ,0 AS FTEXP_VOLUME_L
+    FROM STG_FC_ZIP_VOLUMES C
+    LEFT JOIN Sys_Zipcode_LS_Contribution L
+        ON C.Zipcode=L.Zipcode
+        AND TRIM(L.C_VERSION) = vLARGESMALL
+        AND TRIM(L.SHIP_METHOD) = 'STD'
+    LEFT JOIN SYS_STN_ZIP_MAPPING_ACT M
+        ON C.Zipcode=M.ZIPCODE
+        AND L.Package_Type=M.PACKAGE_TYPE
+        AND TRIM(M.C_VERSION) = vSTNZIP
+        AND TRIM(M.SHIP_METHOD) = 'STD'
+    INNER JOIN (SELECT ZIPCODE FROM SYS_STN_ZIP_MAPPING_ACT
+                                             WHERE UPPER(TRIM(C_VERSION)) = vSTNZIP
+                                             GROUP BY ZIPCODE) Z
+    ON C.Zipcode=Z.Zipcode
+    WHERE STD_VOLUME > 0
+    AND UPPER(TRIM(FLAG)) = 'AMZL'
+    --THE BELOW LINE HAS BEEN SHIFTED TO INNER JOIN ABOVE
+    --AND C.Zipcode IN (SELECT ZIPCODE FROM SYS_STN_ZIP_MAPPING_ACT WHERE UPPER(TRIM(C_VERSION)) = vSTNZIP GROUP BY ZIPCODE)
+
+    UNION ALL 
+    
+    SELECT C.MODEL_ID
+          ,C.SHIPOUT_DATE
+          ,C.FTSAME_EDD AS EDD
+          ,UPPER(TRIM(C.WAREHOUSE_ID)) AS WAREHOUSE_ID
+          ,UPPER(TRIM(M.STATION)) AS STATION
+          ,C.Zipcode as Zipcode
+          ,0 AS STD_VOLUME
+          ,0 AS STD_VOLUME_L
+          ,C.FTSAME_VOLUME*NVL(L.Contribution,1)*NVL(M.RATIO,1) AS FTSAME_VOLUME
+          ,CASE WHEN L.PACKAGE_TYPE = 3 THEN C.FTSAME_VOLUME*NVL(L.Contribution,1)*NVL(M.RATIO,1) ELSE 0 END AS FTSAME_VOLUME_L
+          ,0 AS FTNEXT_VOLUME
+          ,0 AS FTNEXT_VOLUME_L
+          ,0 AS FTEXP_VOLUME
+          ,0 AS FTEXP_VOLUME_L
+    FROM STG_FC_ZIP_VOLUMES C
+    LEFT JOIN Sys_Zipcode_LS_Contribution L
+        ON C.Zipcode=L.Zipcode
+        AND TRIM(L.C_VERSION) = vLARGESMALL
+        AND TRIM(L.SHIP_METHOD) = 'SAME'
+        LEFT JOIN SYS_STN_ZIP_MAPPING_ACT M
+        ON C.Zipcode=M.ZIPCODE
+        AND L.Package_Type=M.PACKAGE_TYPE
+        AND TRIM(M.C_VERSION) = vSTNZIP
+        AND TRIM(M.SHIP_METHOD) = 'SAME'       
+    WHERE FTSAME_VOLUME > 0
+    
+    
+    
+    UNION ALL
+    
+    SELECT C.MODEL_ID
+          ,C.SHIPOUT_DATE
+          ,C.FTNEXT_EDD AS EDD
+          ,UPPER(TRIM(C.WAREHOUSE_ID)) AS WAREHOUSE_ID
+          ,UPPER(TRIM(M.STATION)) AS STATION
+          ,C.Zipcode as Zipcode
+          ,0 AS STD_VOLUME
+          ,0 AS STD_VOLUME_L
+          ,0 AS FTSAME_VOLUME
+          ,0 AS FTSAME_VOLUME_L
+          ,C.FTNEXT_VOLUME*NVL(L.Contribution,1)*NVL(M.RATIO,1) AS FTNEXT_VOLUME
+          ,CASE WHEN L.PACKAGE_TYPE = 3 THEN C.FTNEXT_VOLUME*NVL(L.Contribution,1)*NVL(M.RATIO,1) ELSE 0 END AS FTNEXT_VOLUME_L
+          ,0 AS FTEXP_VOLUME
+          ,0 AS FTEXP_VOLUME_L
+    FROM STG_FC_ZIP_VOLUMES C
+    LEFT JOIN Sys_Zipcode_LS_Contribution L
+        ON C.Zipcode=L.Zipcode
+        AND TRIM(L.C_VERSION) = vLARGESMALL
+        AND TRIM(L.SHIP_METHOD) = 'NEXT'
+        LEFT JOIN SYS_STN_ZIP_MAPPING_ACT M
+        ON C.Zipcode=M.ZIPCODE
+        AND L.Package_Type=M.PACKAGE_TYPE
+        AND TRIM(M.SHIP_METHOD) = 'NEXT'        
+        AND TRIM(M.C_VERSION) = vSTNZIP
+    WHERE FTNEXT_VOLUME > 0
+    
+    
+    UNION ALL
+    
+    SELECT C.MODEL_ID
+          ,C.SHIPOUT_DATE
+          ,C.FTEXP_EDD AS EDD
+          ,UPPER(TRIM(C.WAREHOUSE_ID)) AS WAREHOUSE_ID
+          ,UPPER(TRIM(M.STATION)) AS STATION
+          ,C.Zipcode as Zipcode
+          ,0 AS STD_VOLUME
+          ,0 AS STD_VOLUME_L
+          ,0 AS FTSAME_VOLUME
+          ,0 AS FTSAME_VOLUME_L
+          ,0 AS FTNEXT_VOLUME
+          ,0 AS FTNEXT_VOLUME_L
+          ,C.FTEXP_VOLUME*NVL(L.Contribution,1)*NVL(M.RATIO,1) AS FTEXP_VOLUME
+          ,CASE WHEN L.PACKAGE_TYPE = 3 THEN C.FTEXP_VOLUME*NVL(L.Contribution,1)*NVL(M.RATIO,1) ELSE 0 END AS FTEXP_VOLUME_L
+    FROM STG_FC_ZIP_VOLUMES C
+    LEFT JOIN Sys_Zipcode_LS_Contribution L
+        ON C.Zipcode=L.Zipcode
+        AND TRIM(L.C_VERSION) = vLARGESMALL
+        AND TRIM(L.SHIP_METHOD) = 'EXP'
+        LEFT JOIN SYS_STN_ZIP_MAPPING_ACT M
+        ON C.Zipcode=M.ZIPCODE
+        AND L.Package_Type=M.PACKAGE_TYPE
+        AND TRIM(M.SHIP_METHOD) = 'EXP'
+        AND TRIM(M.C_VERSION) = vSTNZIP
+    WHERE FTEXP_VOLUME > 0
+    
+) A
+
+GROUP BY MODEL_ID
+      ,SHIPOUT_DATE
+      ,EDD
+      ,WAREHOUSE_ID
+      ,ZIPCODE
+      ,STATION;
+
+/*
+  Calculating 2nd level bleed-offs due to STD TT provided by 3P being better than STD TT provided by AMZL.
+  AMZL, 3P flag had already been set in previous procedure(USP_FC_ZIPCODE_VOLUME) based on STD TTs.
+*/
+
+INSERT INTO STG_BLEEDOFFS_LEVEL2
+SELECT MODEL_ID
+      ,SHIPOUT_DATE
+      ,ZIPCODE
+      ,UPPER(TRIM(WAREHOUSE_ID)) AS WAREHOUSE_ID
+      ,SUM(STD_VOLUME) AS SHIPMENTS
+FROM STG_FC_ZIP_VOLUMES
+WHERE STD_VOLUME > 0
+AND UPPER(TRIM(FLAG)) <> 'AMZL' 
+AND CAST(TRIM(Zipcode) AS INTEGER) IN (SELECT ZIPCODE 
+                                             FROM SYS_STN_ZIP_MAPPING_ACT
+                                             WHERE UPPER(TRIM(C_VERSION)) = vSTNZIP 
+                                             GROUP BY ZIPCODE)
+GROUP BY MODEL_ID
+      ,SHIPOUT_DATE
+      ,ZIPCODE
+      ,UPPER(TRIM(WAREHOUSE_ID));
+         
+EXECUTE IMMEDIATE 'TRUNCATE TABLE stg_StationVolume DROP STORAGE';
+COMMIT;
+
+
+Insert into STG_STATIONVOLUME
+SELECT Model_Id
+      ,E.ID AS MMLINKSTD
+      ,ftsame.ID AS MMLINKSAME
+      ,ftnext.ID AS MMLINKNEXT
+      ,ftexp.ID AS MMLINKEXP
+      ,C.WAREHOUSE_ID
+      ,C.Shipout_date
+	    ,UPPER(TRIM(C.STATION)) as Station
+      ,EDD
+	    ,SUM(NVL(STD_Shipments,0)) as STD_Shipments
+      ,SUM(NVL(FT_same,0)) as FT_same
+      ,SUM(NVL(FT_next,0)) as FT_next
+      ,SUM(NVL(FT_exp,0)) as FT_exp
+      ,SUM(NVL(STD_Shipments_L,0)) as STD_Shipments_L
+      ,SUM(NVL(FT_same_L,0)) as FT_same_L
+      ,SUM(NVL(FT_next_L,0)) as FT_next_L
+      ,SUM(NVL(FT_exp_L,0)) as FT_exp_L
+      ,CASE WHEN E.STATION IS NULL THEN 'No' ELSE 'Yes' END  AS ROUTEINFO
+    FROM (Select Model_Id,
+       EDD,
+       Shipout_date,
+       CAST(TRIM(Zipcode) AS INTEGER) as Zipcode,
+       UPPER(TRIM(WAREHOUSE_ID)) AS WAREHOUSE_ID,
+       STATION,
+       SUM(NVL(STD_VOLUME,0)) as STD_Shipments,
+       SUM(NVL(FTSAME_VOLUME,0)) as FT_same,
+       SUM(NVL(FTNEXT_VOLUME,0)) as FT_next,
+       SUM(NVL(FTEXP_VOLUME,0)) as FT_exp,
+       SUM(NVL(STD_VOLUME_L,0)) as STD_Shipments_L,
+       SUM(NVL(FTSAME_VOLUME_L,0)) as FT_same_L,
+       SUM(NVL(FTNEXT_VOLUME_L,0)) as FT_next_L,
+       SUM(NVL(FTEXP_VOLUME_L,0)) as FT_exp_L
+       from stg_ZipcodeVolumes_ACT
+       GROUP BY Model_Id,
+       EDD,
+       Shipout_date,
+       CAST(TRIM(Zipcode) AS INTEGER),
+       UPPER(TRIM(WAREHOUSE_ID)),
+       STATION) C
+    LEFT JOIN (      Select * from
+          (Select ID,FC,
+       --SHIPMETHOD,
+       CASE WHEN SHIPMETHOD11 IS NOT NULL THEN NODE11
+            WHEN SHIPMETHOD10 IS NOT NULL THEN NODE10
+            WHEN SHIPMETHOD9 IS NOT NULL THEN NODE9
+            WHEN SHIPMETHOD8 IS NOT NULL THEN NODE8
+            WHEN SHIPMETHOD7 IS NOT NULL THEN NODE7
+            WHEN SHIPMETHOD6 IS NOT NULL THEN NODE6
+            WHEN SHIPMETHOD5 IS NOT NULL THEN NODE5
+            WHEN SHIPMETHOD4 IS NOT NULL THEN NODE4
+            WHEN SHIPMETHOD3 IS NOT NULL THEN NODE3
+            WHEN SHIPMETHOD2 IS NOT NULL THEN NODE2
+            WHEN SHIPMETHOD1 IS NOT NULL THEN NODE1
+            ELSE 'Not Configured' END AS STATION  
+            ,Row_number() over (partition by FC,
+       --SHIPMETHOD,
+       CASE WHEN SHIPMETHOD11 IS NOT NULL THEN NODE11
+            WHEN SHIPMETHOD10 IS NOT NULL THEN NODE10
+            WHEN SHIPMETHOD9 IS NOT NULL THEN NODE9
+            WHEN SHIPMETHOD8 IS NOT NULL THEN NODE8
+            WHEN SHIPMETHOD7 IS NOT NULL THEN NODE7
+            WHEN SHIPMETHOD6 IS NOT NULL THEN NODE6
+            WHEN SHIPMETHOD5 IS NOT NULL THEN NODE5
+            WHEN SHIPMETHOD4 IS NOT NULL THEN NODE4
+            WHEN SHIPMETHOD3 IS NOT NULL THEN NODE3
+            WHEN SHIPMETHOD2 IS NOT NULL THEN NODE2
+            WHEN SHIPMETHOD1 IS NOT NULL THEN NODE1
+            ELSE 'Not Configured' END order by FC) as ct
+      FROM SYS_ESMM_ROUTES
+      WHERE ROUTEENABLED = 'Yes' AND C_VERSION = vESMM
+      AND SHIPMETHOD IN ('ATS_INJ_STD')
+      GROUP BY ID,FC,
+       --SHIPMETHOD,
+       CASE WHEN SHIPMETHOD11 IS NOT NULL THEN NODE11
+            WHEN SHIPMETHOD10 IS NOT NULL THEN NODE10
+            WHEN SHIPMETHOD9 IS NOT NULL THEN NODE9
+            WHEN SHIPMETHOD8 IS NOT NULL THEN NODE8
+            WHEN SHIPMETHOD7 IS NOT NULL THEN NODE7
+            WHEN SHIPMETHOD6 IS NOT NULL THEN NODE6
+            WHEN SHIPMETHOD5 IS NOT NULL THEN NODE5
+            WHEN SHIPMETHOD4 IS NOT NULL THEN NODE4
+            WHEN SHIPMETHOD3 IS NOT NULL THEN NODE3
+            WHEN SHIPMETHOD2 IS NOT NULL THEN NODE2
+            WHEN SHIPMETHOD1 IS NOT NULL THEN NODE1
+            ELSE 'Not Configured' END) A
+            where ct = 1) E
+      ON E.FC = C.WAREHOUSE_ID
+      AND UPPER(TRIM(E.STATION)) = UPPER(TRIM(C.STATION))
+      LEFT JOIN (      Select * from
+          (Select ID,FC,
+       --SHIPMETHOD,
+       CASE WHEN SHIPMETHOD11 IS NOT NULL THEN NODE11
+            WHEN SHIPMETHOD10 IS NOT NULL THEN NODE10
+            WHEN SHIPMETHOD9 IS NOT NULL THEN NODE9
+            WHEN SHIPMETHOD8 IS NOT NULL THEN NODE8
+            WHEN SHIPMETHOD7 IS NOT NULL THEN NODE7
+            WHEN SHIPMETHOD6 IS NOT NULL THEN NODE6
+            WHEN SHIPMETHOD5 IS NOT NULL THEN NODE5
+            WHEN SHIPMETHOD4 IS NOT NULL THEN NODE4
+            WHEN SHIPMETHOD3 IS NOT NULL THEN NODE3
+            WHEN SHIPMETHOD2 IS NOT NULL THEN NODE2
+            WHEN SHIPMETHOD1 IS NOT NULL THEN NODE1
+            ELSE 'Not Configured' END AS STATION  
+            ,Row_number() over (partition by FC,
+       --SHIPMETHOD,
+       CASE WHEN SHIPMETHOD11 IS NOT NULL THEN NODE11
+            WHEN SHIPMETHOD10 IS NOT NULL THEN NODE10
+            WHEN SHIPMETHOD9 IS NOT NULL THEN NODE9
+            WHEN SHIPMETHOD8 IS NOT NULL THEN NODE8
+            WHEN SHIPMETHOD7 IS NOT NULL THEN NODE7
+            WHEN SHIPMETHOD6 IS NOT NULL THEN NODE6
+            WHEN SHIPMETHOD5 IS NOT NULL THEN NODE5
+            WHEN SHIPMETHOD4 IS NOT NULL THEN NODE4
+            WHEN SHIPMETHOD3 IS NOT NULL THEN NODE3
+            WHEN SHIPMETHOD2 IS NOT NULL THEN NODE2
+            WHEN SHIPMETHOD1 IS NOT NULL THEN NODE1
+            ELSE 'Not Configured' END order by FC) as ct
+      FROM SYS_ESMM_ROUTES
+      WHERE ROUTEENABLED = 'Yes' AND C_VERSION = vESMM
+      AND SHIPMETHOD IN ('ATS_INJ_SAME')
+      GROUP BY ID,FC,
+       --SHIPMETHOD,
+       CASE WHEN SHIPMETHOD11 IS NOT NULL THEN NODE11
+            WHEN SHIPMETHOD10 IS NOT NULL THEN NODE10
+            WHEN SHIPMETHOD9 IS NOT NULL THEN NODE9
+            WHEN SHIPMETHOD8 IS NOT NULL THEN NODE8
+            WHEN SHIPMETHOD7 IS NOT NULL THEN NODE7
+            WHEN SHIPMETHOD6 IS NOT NULL THEN NODE6
+            WHEN SHIPMETHOD5 IS NOT NULL THEN NODE5
+            WHEN SHIPMETHOD4 IS NOT NULL THEN NODE4
+            WHEN SHIPMETHOD3 IS NOT NULL THEN NODE3
+            WHEN SHIPMETHOD2 IS NOT NULL THEN NODE2
+            WHEN SHIPMETHOD1 IS NOT NULL THEN NODE1
+            ELSE 'Not Configured' END) A
+            where ct = 1) ftsame
+            ON ftsame.FC = C.WAREHOUSE_ID
+           AND UPPER(TRIM(ftsame.STATION)) = UPPER(TRIM(C.STATION))
+          LEFT JOIN (      Select * from
+          (Select ID,FC,
+       --SHIPMETHOD,
+       CASE WHEN SHIPMETHOD11 IS NOT NULL THEN NODE11
+            WHEN SHIPMETHOD10 IS NOT NULL THEN NODE10
+            WHEN SHIPMETHOD9 IS NOT NULL THEN NODE9
+            WHEN SHIPMETHOD8 IS NOT NULL THEN NODE8
+            WHEN SHIPMETHOD7 IS NOT NULL THEN NODE7
+            WHEN SHIPMETHOD6 IS NOT NULL THEN NODE6
+            WHEN SHIPMETHOD5 IS NOT NULL THEN NODE5
+            WHEN SHIPMETHOD4 IS NOT NULL THEN NODE4
+            WHEN SHIPMETHOD3 IS NOT NULL THEN NODE3
+            WHEN SHIPMETHOD2 IS NOT NULL THEN NODE2
+            WHEN SHIPMETHOD1 IS NOT NULL THEN NODE1
+            ELSE 'Not Configured' END AS STATION  
+            ,Row_number() over (partition by FC,
+       --SHIPMETHOD,
+       CASE WHEN SHIPMETHOD11 IS NOT NULL THEN NODE11
+            WHEN SHIPMETHOD10 IS NOT NULL THEN NODE10
+            WHEN SHIPMETHOD9 IS NOT NULL THEN NODE9
+            WHEN SHIPMETHOD8 IS NOT NULL THEN NODE8
+            WHEN SHIPMETHOD7 IS NOT NULL THEN NODE7
+            WHEN SHIPMETHOD6 IS NOT NULL THEN NODE6
+            WHEN SHIPMETHOD5 IS NOT NULL THEN NODE5
+            WHEN SHIPMETHOD4 IS NOT NULL THEN NODE4
+            WHEN SHIPMETHOD3 IS NOT NULL THEN NODE3
+            WHEN SHIPMETHOD2 IS NOT NULL THEN NODE2
+            WHEN SHIPMETHOD1 IS NOT NULL THEN NODE1
+            ELSE 'Not Configured' END order by FC) as ct
+      FROM SYS_ESMM_ROUTES
+      WHERE ROUTEENABLED = 'Yes' AND C_VERSION = vESMM
+      AND SHIPMETHOD IN ('ATS_INJ_NEXT')
+      GROUP BY ID,FC,
+       --SHIPMETHOD,
+       CASE WHEN SHIPMETHOD11 IS NOT NULL THEN NODE11
+            WHEN SHIPMETHOD10 IS NOT NULL THEN NODE10
+            WHEN SHIPMETHOD9 IS NOT NULL THEN NODE9
+            WHEN SHIPMETHOD8 IS NOT NULL THEN NODE8
+            WHEN SHIPMETHOD7 IS NOT NULL THEN NODE7
+            WHEN SHIPMETHOD6 IS NOT NULL THEN NODE6
+            WHEN SHIPMETHOD5 IS NOT NULL THEN NODE5
+            WHEN SHIPMETHOD4 IS NOT NULL THEN NODE4
+            WHEN SHIPMETHOD3 IS NOT NULL THEN NODE3
+            WHEN SHIPMETHOD2 IS NOT NULL THEN NODE2
+            WHEN SHIPMETHOD1 IS NOT NULL THEN NODE1
+            ELSE 'Not Configured' END) A
+            where ct = 1) ftnext
+            ON ftnext.FC = C.WAREHOUSE_ID
+          AND UPPER(TRIM(ftnext.STATION)) = UPPER(TRIM(C.STATION))
+          LEFT JOIN (   Select * from
+          (Select ID,FC,
+       --SHIPMETHOD,
+       CASE WHEN SHIPMETHOD11 IS NOT NULL THEN NODE11
+            WHEN SHIPMETHOD10 IS NOT NULL THEN NODE10
+            WHEN SHIPMETHOD9 IS NOT NULL THEN NODE9
+            WHEN SHIPMETHOD8 IS NOT NULL THEN NODE8
+            WHEN SHIPMETHOD7 IS NOT NULL THEN NODE7
+            WHEN SHIPMETHOD6 IS NOT NULL THEN NODE6
+            WHEN SHIPMETHOD5 IS NOT NULL THEN NODE5
+            WHEN SHIPMETHOD4 IS NOT NULL THEN NODE4
+            WHEN SHIPMETHOD3 IS NOT NULL THEN NODE3
+            WHEN SHIPMETHOD2 IS NOT NULL THEN NODE2
+            WHEN SHIPMETHOD1 IS NOT NULL THEN NODE1
+            ELSE 'Not Configured' END AS STATION  
+            ,Row_number() over (partition by FC,
+       --SHIPMETHOD,
+       CASE WHEN SHIPMETHOD11 IS NOT NULL THEN NODE11
+            WHEN SHIPMETHOD10 IS NOT NULL THEN NODE10
+            WHEN SHIPMETHOD9 IS NOT NULL THEN NODE9
+            WHEN SHIPMETHOD8 IS NOT NULL THEN NODE8
+            WHEN SHIPMETHOD7 IS NOT NULL THEN NODE7
+            WHEN SHIPMETHOD6 IS NOT NULL THEN NODE6
+            WHEN SHIPMETHOD5 IS NOT NULL THEN NODE5
+            WHEN SHIPMETHOD4 IS NOT NULL THEN NODE4
+            WHEN SHIPMETHOD3 IS NOT NULL THEN NODE3
+            WHEN SHIPMETHOD2 IS NOT NULL THEN NODE2
+            WHEN SHIPMETHOD1 IS NOT NULL THEN NODE1
+            ELSE 'Not Configured' END order by FC) as ct
+      FROM SYS_ESMM_ROUTES
+      WHERE ROUTEENABLED = 'Yes' AND C_VERSION = vESMM
+      AND SHIPMETHOD IN ('ATS_INJ_EXP')
+      GROUP BY ID,FC,
+       --SHIPMETHOD,
+       CASE WHEN SHIPMETHOD11 IS NOT NULL THEN NODE11
+            WHEN SHIPMETHOD10 IS NOT NULL THEN NODE10
+            WHEN SHIPMETHOD9 IS NOT NULL THEN NODE9
+            WHEN SHIPMETHOD8 IS NOT NULL THEN NODE8
+            WHEN SHIPMETHOD7 IS NOT NULL THEN NODE7
+            WHEN SHIPMETHOD6 IS NOT NULL THEN NODE6
+            WHEN SHIPMETHOD5 IS NOT NULL THEN NODE5
+            WHEN SHIPMETHOD4 IS NOT NULL THEN NODE4
+            WHEN SHIPMETHOD3 IS NOT NULL THEN NODE3
+            WHEN SHIPMETHOD2 IS NOT NULL THEN NODE2
+            WHEN SHIPMETHOD1 IS NOT NULL THEN NODE1
+            ELSE 'Not Configured' END) A
+            where ct = 1) ftexp
+            ON ftexp.FC = C.WAREHOUSE_ID
+      AND UPPER(TRIM(ftexp.STATION)) = UPPER(TRIM(C.STATION))
+    WHERE Model_Id IS NOT NULL
+    GROUP BY Model_Id
+	          ,UPPER(TRIM(C.STATION))
+            ,E.ID
+            ,ftsame.ID
+            ,ftnext.ID
+            ,ftexp.ID
+            ,C.WAREHOUSE_ID
+            ,C.Shipout_date
+            ,EDD
+            ,CASE WHEN E.STATION IS NULL THEN 'No' ELSE 'Yes' END;
+
+COMMIT;
+
+EXECUTE IMMEDIATE 'TRUNCATE TABLE stg_StationMFNVolume DROP STORAGE';
+
+COMMIT;
+
+
+
+Insert into stg_StationMFNVolume -- Insert MFN data at Station into staging table
+ Select Z.Model_Id as Model_Id
+       ,Z.Station
+       ,Z.EDD
+       ,sum(NVL(Z.Shipments,0)*NVL(M.MFN,0)) as MFNVolume
+       ,sum(NVL(Z.Shipments_L,0)*NVL(M.MFN,0)) as MFNVolume_L
+       --,sum(NVL(Z.Shipments,0)*NVL(NVL(M.MFN,M.MFN),0)) as MFNVolume
+       --,sum(NVL(Z.Shipments_L,0)*NVL(NVL(M.MFN,S.MFN),0)) as MFNVolume_L
+ from 
+(SELECT Model_Id
+      ,UPPER(TRIM(Station)) AS Station
+      ,EDD
+      ,sum(STD_Shipments+FT_same+FT_next+FT_exp) as Shipments
+      ,sum(STD_Shipments_L+FT_same_L+FT_next_L+FT_exp_L) as Shipments_L
+  FROM STG_STATIONVOLUME
+  WHERE ROUTEINFO = 'Yes'
+  GROUP BY Model_Id
+      ,UPPER(TRIM(Station))
+      ,EDD) Z
+/*  --------------TO BE REMOVED--------------------
+  left join (SELECT UPPER(TRIM(Warehouse_Id)) AS Warehouse_Id
+                   ,sum(case when DemandType='MFN' then Std_Contribution end) as MFN_Contrib
+                   ,sum(case when DemandType='AFN' then Std_Contribution end) as AFN_Contrib
+	                 ,NVL(sum(case when DemandType='MFN' then Std_Contribution end)/sum(Std_Contribution),0) as MFN
+	           FROM SYS_MFN_ZIP_CONTRIBUTION -- Data for MFN Contribution at Station from history
+             WHERE DEMANDTYPE IN ('AFN','MFN') AND C_VERSION = vMFN
+	           GROUP BY UPPER(TRIM(Warehouse_Id))) S
+  on Z.Station=S.Warehouse_Id
+*/  ---------------------------------------------------------------------------------------------------
+  LEFT JOIN (SELECT STATION AS Warehouse_Id,DAYTYPE,MFN_CONTRIB as MFN
+FROM SYS_MFN_STN_CONTRIBUTION
+WHERE C_VERSION = vMFN ) M
+on Z.Station=M.Warehouse_Id
+AND TRIM(TO_CHAR(Z.EDD,'Day')) = TRIM(DAYTYPE)
+  Group by Z.Model_Id
+          ,Z.Station
+          ,Z.EDD;
+
+COMMIT;
+
+
+END;
+--COMMIT;

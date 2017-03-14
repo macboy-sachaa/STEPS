@@ -1,0 +1,78 @@
+create or replace PROCEDURE USP_QUEUE_CONFIG_LOAD(vC_VERSION NVARCHAR2) AS 
+vVERSION_ID INTEGER;
+vFLAG INTEGER;
+vSEQ INTEGER;
+vNAME NVARCHAR2(100);
+BEGIN
+  
+  SELECT ROW_ID INTO vVERSION_ID
+  FROM SYS_VERSIONS
+  WHERE C_VERSION = vC_VERSION;
+  
+  SELECT VERSION_NAME INTO vNAME
+  FROM SYS_VERSIONS
+  WHERE C_VERSION = vC_VERSION; 
+  
+  SELECT COUNT(*) INTO vFLAG 
+  FROM SYS_CONFIG_RUN_QUEUE
+  WHERE IS_ACTIVE = 1;
+  
+  SELECT NVL(MAX(ROW_ID),0) INTO vSEQ 
+  FROM SYS_CONFIG_RUN_QUEUE;
+  
+  IF(vFLAG = 0)
+  THEN
+  -- dbms_output.put_line(vSEQ+1 || UPPER(TRIM(vC_VERSION)) || SYSDATE || 1);
+  
+  INSERT INTO SYS_CONFIG_RUN_QUEUE
+  (ROW_ID,C_VERSION,LAST_UPDATED,IS_ACTIVE)
+  VALUES
+  (vSEQ+1,UPPER(TRIM(vC_VERSION)),SYSDATE,1);
+      
+  COMMIT;
+  
+  dbms_output.put_line('I am here');
+  
+  BEGIN
+  DBMS_SCHEDULER.RUN_JOB(
+    JOB_NAME            => 'JOB_LOAD_CONFIGURATION',
+    USE_CURRENT_SESSION => FALSE);
+  END;
+  
+  apex_application.g_print_success_message:= CONCAT(CONCAT('<span class="notification">Configuration (', vNAME) ,') Load Started.</span>');
+  
+  ELSE
+  
+ /* 
+  dbms_output.put_line('something went wrong');
+  
+  SELECT MAX(ROW_ID) FROM SYS_CONFIG_RUN_QUEUE
+  WHERE C_VERSION = vvERSION;
+  
+  SELECT VERSION_NAME INTO vNAME
+  FROM SYS_VERSIONS
+  WHERE C_VERSION = (SELECT C_VERSION 
+  FROM SYS_CONFIG_RUN_QUEUE
+  WHERE IS_ACTIVE = 1); 
+  
+  UPDATE SYS_CONFIG_RUN_QUEUE
+  SET IS_ACTIVE = 0
+  WHERE IS_ACTIVE = 1
+  AND C_VERSION = vC_VERSION
+  AND ;
+  COMMIT; 
+  */
+  
+  apex_application.g_print_success_message:= CONCAT(CONCAT('<span class="notification">Configuration (', vNAME) ,')already running(try after sometime).</span>');
+  
+  END IF;
+  
+ EXCEPTION
+  WHEN OTHERS THEN
+    ROLLBACK;
+    UPDATE SYS_CONFIG_RUN_QUEUE
+    SET IS_ACTIVE = 0
+    WHERE IS_ACTIVE = 1;
+    COMMIT; 
+  
+END USP_QUEUE_CONFIG_LOAD;
